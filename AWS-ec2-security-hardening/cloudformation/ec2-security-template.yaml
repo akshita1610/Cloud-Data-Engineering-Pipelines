@@ -1,0 +1,502 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS EC2 Security Project - Comprehensive EC2 instance security setup'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Network Configuration'
+        Parameters:
+          - VpcCidr
+          - SubnetCidr
+          - AllowedSSHIP
+      - Label:
+          default: 'Instance Configuration'
+        Parameters:
+          - InstanceType
+          - KeyPairName
+          - AMIID
+      - Label:
+          default: 'Monitoring Configuration'
+        Parameters:
+          - AlertEmail
+          - EnableMonitoring
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: '10.0.0.0/16'
+    Description: 'CIDR block for VPC'
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+  
+  SubnetCidr:
+    Type: String
+    Default: '10.0.1.0/24'
+    Description: 'CIDR block for subnet'
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+  
+  AllowedSSHIP:
+    Type: String
+    Description: 'Your public IP address for SSH access (use 0.0.0.0/0 for any)'
+    Default: '0.0.0.0/0'
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$'
+  
+  InstanceType:
+    Type: String
+    Default: 't2.micro'
+    Description: 'EC2 instance type'
+    AllowedValues:
+      - t2.nano
+      - t2.micro
+      - t2.small
+      - t3.nano
+      - t3.micro
+      - t3.small
+  
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: 'Name of an existing EC2 KeyPair for SSH access'
+  
+  AMIID:
+    Type: String
+    Default: 'ami-0c55b159cbfafe1f0'
+    Description: 'AMI ID for Amazon Linux 2'
+  
+  AlertEmail:
+    Type: String
+    Description: 'Email address for CloudWatch alerts (optional)'
+    Default: ''
+  
+  EnableMonitoring:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: 'Enable CloudWatch monitoring and alarms'
+
+Resources:
+  # VPC
+  SecurityVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+        - Key: Project
+          Value: 'AWS-EC2-Security'
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+        - Key: Project
+          Value: 'AWS-EC2-Security'
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref SecurityVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnet
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet'
+        - Key: Project
+          Value: 'AWS-EC2-Security'
+
+  # Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SecurityVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-rt'
+        - Key: Project
+          Value: 'AWS-EC2-Security'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Group
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for EC2 instance with SSH access'
+      VpcId: !Ref SecurityVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHIP
+          Description: 'SSH access'
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+          Description: 'HTTP access'
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+          Description: 'HTTPS access'
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: '0.0.0.0/0'
+          Description: 'Allow all outbound traffic'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sg'
+        - Key: Project
+          Value: 'AWS-EC2-Security'
+
+  # IAM Role for EC2
+  EC2IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-role'
+        - Key: Project
+          Value: 'AWS-EC2-Security'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2IAMRole
+
+  # EC2 Instance
+  SecurityInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AMIID
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          
+          # Create log file
+          LOG_FILE="/var/log/user-data.log"
+          touch "$LOG_FILE"
+          
+          log() {
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+          }
+          
+          log "Starting EC2 instance initialization..."
+          
+          # Update system
+          log "Updating system packages..."
+          yum update -y >> "$LOG_FILE" 2>&1
+          yum upgrade -y >> "$LOG_FILE" 2>&1
+          
+          # Install basic tools
+          log "Installing basic tools..."
+          yum install -y git wget curl htop >> "$LOG_FILE" 2>&1
+          
+          # Create new user
+          NEW_USERNAME="secureuser"
+          log "Creating user: $NEW_USERNAME"
+          if ! id "$NEW_USERNAME" &>/dev/null; then
+            useradd -m -s /bin/bash "$NEW_USERNAME"
+            passwd -l "$NEW_USERNAME" >> "$LOG_FILE" 2>&1
+            usermod -aG wheel "$NEW_USERNAME"
+            
+            mkdir -p "/home/$NEW_USERNAME/.ssh"
+            chmod 700 "/home/$NEW_USERNAME/.ssh"
+            chown "$NEW_USERNAME:$NEW_USERNAME" "/home/$NEW_USERNAME/.ssh"
+            
+            if [ -f "/home/ec2-user/.ssh/authorized_keys" ]; then
+              cp "/home/ec2-user/.ssh/authorized_keys" "/home/$NEW_USERNAME/.ssh/authorized_keys"
+              chmod 600 "/home/$NEW_USERNAME/.ssh/authorized_keys"
+              chown "$NEW_USERNAME:$NEW_USERNAME" "/home/$NEW_USERNAME/.ssh/authorized_keys"
+            fi
+            
+            log "User $NEW_USERNAME created successfully"
+          else
+            log "User $NEW_USERNAME already exists"
+          fi
+          
+          # Basic SSH hardening
+          log "Applying basic SSH hardening..."
+          sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config || true
+          sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config || true
+          sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config || true
+          
+          systemctl restart sshd >> "$LOG_FILE" 2>&1
+          
+          # Install CloudWatch agent if monitoring is enabled
+          if [ "${EnableMonitoring}" = "true" ]; then
+            log "Installing CloudWatch agent..."
+            yum install -y amazon-cloudwatch-agent >> "$LOG_FILE" 2>&1
+            
+            # Create CloudWatch agent configuration
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
+          {
+            "agent": {
+              "metrics_collection_interval": 60,
+              "run_as_user": "cwagent"
+            },
+            "metrics": {
+              "namespace": "CWAgent",
+              "metrics_collected": {
+                "cpu": {
+                  "measurement": ["cpu_usage_idle", "cpu_usage_iowait", "cpu_usage_user", "cpu_usage_system"],
+                  "metrics_collection_interval": 60
+                },
+                "disk": {
+                  "measurement": ["used_percent"],
+                  "metrics_collection_interval": 60,
+                  "resources": ["*"]
+                },
+                "mem": {
+                  "measurement": ["mem_used_percent"],
+                  "metrics_collection_interval": 60
+                }
+              }
+            }
+          }
+          EOF
+            
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s >> "$LOG_FILE" 2>&1
+            log "CloudWatch agent installed and configured"
+          fi
+          
+          log "EC2 instance initialization completed successfully"
+          
+          # Create welcome message
+          cat > /etc/motd << 'EOF'
+          ========================================
+          AWS EC2 Security Instance
+          ========================================
+          
+          This instance has been configured with security best practices:
+          
+          - System packages updated
+          - New user created: secureuser
+          - Basic SSH hardening applied
+          - Root login disabled
+          - Password authentication disabled
+          
+          For full security hardening, run:
+          sudo yum install -y git
+          cd /tmp
+          git clone <repository-url>
+          cd aws-ec2-security/scripts
+          sudo ./harden.sh
+          
+          ========================================
+          EOF
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-instance'
+        - Key: Project
+          Value: 'AWS-EC2-Security'
+        - Key: Environment
+          Value: !Ref AWS::StackName
+
+  # CloudWatch Alarms (if monitoring enabled)
+  CPUHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-CPU-High'
+      AlarmDescription: 'EC2 instance CPU utilization is above 80%'
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref SecurityInstance
+      Unit: Percent
+
+  MemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-Memory-High'
+      AlarmDescription: 'EC2 instance memory utilization is above 90%'
+      MetricName: mem_used_percent
+      Namespace: CWAgent
+      Statistic: Average
+      Period: 300
+      Threshold: 90
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref SecurityInstance
+      Unit: Percent
+
+  DiskHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-Disk-High'
+      AlarmDescription: 'EC2 instance disk utilization is above 85%'
+      MetricName: used_percent
+      Namespace: CWAgent
+      Statistic: Average
+      Period: 300
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 2
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref SecurityInstance
+        - Name: Device
+          Value: /
+      Unit: Percent
+
+  StatusCheckFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableMonitoringCondition
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-Status-Check-Failed'
+      AlarmDescription: 'EC2 instance status check failed'
+      MetricName: StatusCheckFailed
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref SecurityInstance
+
+  # SNS Topic for alerts (if email provided)
+  AlertSNSTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasAlertEmail
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-alerts'
+      DisplayName: !Sub '${AWS::StackName} Security Alerts'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sns'
+        - Key: Project
+          Value: 'AWS-EC2-Security'
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertSNSTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+Conditions:
+  EnableMonitoringCondition: !Equals [!Ref EnableMonitoring, 'true']
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, '']]
+
+Outputs:
+  InstanceId:
+    Description: 'EC2 Instance ID'
+    Value: !Ref SecurityInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+
+  InstancePublicIP:
+    Description: 'Public IP address of the EC2 instance'
+    Value: !GetAtt SecurityInstance.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicIP'
+
+  InstancePublicDNS:
+    Description: 'Public DNS name of the EC2 instance'
+    Value: !GetAtt SecurityInstance.PublicDnsName
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicDNS'
+
+  SecurityGroupId:
+    Description: 'Security Group ID'
+    Value: !Ref InstanceSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroup'
+
+  SSHConnectionCommand:
+    Description: 'SSH command to connect to the instance'
+    Value: !Sub 'ssh -i ${KeyPairName}.pem ec2-user@${SecurityInstance.PublicDnsName}'
+
+  NewUserSSHCommand:
+    Description: 'SSH command to connect as the new secure user'
+    Value: !Sub 'ssh -i ${KeyPairName}.pem secureuser@${SecurityInstance.PublicDnsName}'
+
+  HardeningInstructions:
+    Description: 'Instructions for further hardening'
+    Value: !Sub |
+      1. Connect to the instance: ssh -i ${KeyPairName}.pem ec2-user@${SecurityInstance.PublicDnsName}
+      2. Download the hardening script: 
+         sudo yum install -y git
+         cd /tmp
+         git clone <repository-url>
+         cd aws-ec2-security/scripts
+      3. Run the hardening script: sudo ./harden.sh
+      4. Test the new user: ssh -i ${KeyPairName}.pem secureuser@${SecurityInstance.PublicDnsName}
+
+  MonitoringDashboard:
+    Description: 'CloudWatch dashboard URL (if monitoring enabled)'
+    Condition: EnableMonitoringCondition
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-dashboard'
+
+  AlertSNSTopicArn:
+    Description: 'SNS Topic ARN for alerts (if email provided)'
+    Condition: HasAlertEmail
+    Value: !Ref AlertSNSTopic
