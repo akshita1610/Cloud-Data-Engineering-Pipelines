@@ -1,0 +1,10 @@
+{
+  "title": "CustomRole",
+  "description": "A custom role for specific tasks",
+  "stage": "GA",
+  "includedPermissions": [
+    "compute.instances.list",
+    "compute.instances.stop",
+    "compute.instances.start"
+  ]
+}
